@@ -121,21 +121,32 @@ Bitmap::scanline (unsigned int n)
 void
 Bitmap::clear ()
 {
-  for (std::vector<uint32_t *>::iterator i = m_scanlines.begin (); i != m_scanlines.end (); ++i) {
+  if (m_first_sl >= m_last_sl) {
+    return;
+  }
+
+  if (m_last_sl > m_scanlines.size ()) {
+    m_last_sl = (unsigned int) m_scanlines.size ();
+  }
+  if (m_first_sl > m_last_sl) {
+    m_first_sl = m_last_sl;
+  }
+
+  for (std::vector<uint32_t *>::iterator i = m_scanlines.begin () + m_first_sl; i != m_scanlines.begin () + m_last_sl; ++i) {
     if (*i) {
       m_free.push_back (*i);
+      *i = 0;
     }
   }
-  for (std::vector<uint32_t *>::iterator i = m_scanlines.begin (); i != m_scanlines.end (); ++i) {
-    *i = 0;
-  }
-  m_last_sl = m_first_sl = 0;
+  m_first_sl = m_height;
+  m_last_sl = 0;
 }
 
 void 
 Bitmap::cleanup ()
 {
-  m_last_sl = m_first_sl = 0;
+  m_first_sl = m_height;
+  m_last_sl = 0;
 
   if (m_empty_scanline) {
     delete [] m_empty_scanline;
@@ -153,7 +164,8 @@ Bitmap::cleanup ()
   m_free.clear ();
 
   m_width = m_height = 0;
-  m_last_sl = m_first_sl = 0;
+  m_first_sl = m_height;
+  m_last_sl = 0;
 }
 
 void 
@@ -170,7 +182,8 @@ Bitmap::init (unsigned int w, unsigned int h)
     }
   }
 
-  m_last_sl = m_first_sl = 0;
+  m_first_sl = m_height;
+  m_last_sl = 0;
 }
 
 void 
@@ -350,35 +363,54 @@ static const uint32_t masks [32] = {
 
 static const uint32_t all_ones = 0xffffffff;
 
-void 
-Bitmap::fill (unsigned int y, unsigned int x1, unsigned int x2)
+struct FillSpan
 {
-  unsigned int b1 = x1 / 32;
+  unsigned int b1;
+  unsigned int b;
+  uint32_t first_mask;
+  uint32_t last_mask;
+};
 
-  uint32_t *sl = scanline (y);
-  sl += b1;
+static inline FillSpan
+make_fill_span (unsigned int x1, unsigned int x2)
+{
+  FillSpan span;
+  span.b1 = x1 / 32;
+  span.b = x2 / 32 - span.b1;
+  span.first_mask = (span.b == 0) ? (masks [x2 % 32] & ~masks [x1 % 32]) : ~masks [x1 % 32];
+  span.last_mask = masks [x2 % 32];
+  return span;
+}
 
-  unsigned int b = x2 / 32 - b1;
-  if (b == 0) {
+static inline void
+fill_span (uint32_t *sl, const FillSpan &span)
+{
+  sl += span.b1;
 
-    *sl |= (masks [x2 % 32] & ~masks [x1 % 32]);
+  if (span.b == 0) {
 
-  } else if (b > 0) {
+    *sl |= span.first_mask;
 
-    *sl++ |= ~masks [x1 % 32];
-    while (b > 1) {
-      *sl++ |= all_ones;
-      b--;
+  } else {
+
+    *sl++ |= span.first_mask;
+    for (unsigned int b = span.b; b > 1; --b) {
+      *sl++ = all_ones;
     }
 
-    unsigned int m = masks [x2 % 32];
     //  Hint: if x2==width and width%32==0, sl must not be accessed. This is guaranteed by
-    //  checking if m != 0.
-    if (m) {
-      *sl |= m;
+    //  checking if last_mask != 0.
+    if (span.last_mask) {
+      *sl |= span.last_mask;
     }
 
   }
+}
+
+void
+Bitmap::fill (unsigned int y, unsigned int x1, unsigned int x2)
+{
+  fill_span (scanline (y), make_fill_span (x1, x2));
 }
 
 void
@@ -502,51 +534,92 @@ Bitmap::render_fill (std::vector<lay::RenderEdge> &edges)
 }
 
 static inline bool
+is_vertical (const lay::RenderEdge &e)
+{
+  return ! e.is_horizontal () && fabs (e.x1 () - e.x2 ()) < render_epsilon;
+}
+
+static inline bool
+try_ordered_rect (const std::vector<lay::RenderEdge> &edges, double &xmin, double &xmax, double &ymin, double &ymax)
+{
+  if (! is_vertical (edges [0]) || ! edges [1].is_horizontal () ||
+      ! is_vertical (edges [2]) || ! edges [3].is_horizontal ()) {
+    return false;
+  }
+
+  xmin = std::min (edges [0].x1 (), edges [2].x1 ());
+  xmax = std::max (edges [0].x1 (), edges [2].x1 ());
+  ymin = std::min (edges [1].y1 (), edges [3].y1 ());
+  ymax = std::max (edges [1].y1 (), edges [3].y1 ());
+
+  if (fabs (edges [0].y1 () - ymin) > render_epsilon ||
+      fabs (edges [0].y2 () - ymax) > render_epsilon ||
+      fabs (edges [2].y1 () - ymin) > render_epsilon ||
+      fabs (edges [2].y2 () - ymax) > render_epsilon) {
+    return false;
+  }
+
+  double x1 = std::min (edges [1].x1 (), edges [1].x2 ());
+  double x2 = std::max (edges [1].x1 (), edges [1].x2 ());
+  if (fabs (x1 - xmin) > render_epsilon || fabs (x2 - xmax) > render_epsilon) {
+    return false;
+  }
+
+  x1 = std::min (edges [3].x1 (), edges [3].x2 ());
+  x2 = std::max (edges [3].x1 (), edges [3].x2 ());
+  return fabs (x1 - xmin) <= render_epsilon && fabs (x2 - xmax) <= render_epsilon;
+}
+
+static inline bool
 try_render_rect_fill (Bitmap &bitmap, const std::vector<lay::RenderEdge> &edges)
 {
   if (edges.size () != 4 || bitmap.width () == 0 || bitmap.height () == 0) {
     return false;
   }
 
-  unsigned int nv = 0, nh = 0;
-  double vx [2], vy1 [2], vy2 [2], hy [2], hx1 [2], hx2 [2];
+  double xmin, xmax, ymin, ymax;
+  if (! try_ordered_rect (edges, xmin, xmax, ymin, ymax)) {
 
-  for (std::vector<lay::RenderEdge>::const_iterator e = edges.begin (); e != edges.end (); ++e) {
-    if (e->is_horizontal ()) {
-      if (nh == 2) {
+    unsigned int nv = 0, nh = 0;
+    double vx [2], vy1 [2], vy2 [2], hy [2], hx1 [2], hx2 [2];
+
+    for (std::vector<lay::RenderEdge>::const_iterator e = edges.begin (); e != edges.end (); ++e) {
+      if (e->is_horizontal ()) {
+        if (nh == 2) {
+          return false;
+        }
+        hy [nh] = e->y1 ();
+        hx1 [nh] = std::min (e->x1 (), e->x2 ());
+        hx2 [nh] = std::max (e->x1 (), e->x2 ());
+        ++nh;
+      } else if (is_vertical (*e)) {
+        if (nv == 2) {
+          return false;
+        }
+        vx [nv] = e->x1 ();
+        vy1 [nv] = e->y1 ();
+        vy2 [nv] = e->y2 ();
+        ++nv;
+      } else {
         return false;
       }
-      hy [nh] = e->y1 ();
-      hx1 [nh] = std::min (e->x1 (), e->x2 ());
-      hx2 [nh] = std::max (e->x1 (), e->x2 ());
-      ++nh;
-    } else if (fabs (e->x1 () - e->x2 ()) < render_epsilon) {
-      if (nv == 2) {
-        return false;
-      }
-      vx [nv] = e->x1 ();
-      vy1 [nv] = e->y1 ();
-      vy2 [nv] = e->y2 ();
-      ++nv;
-    } else {
+    }
+
+    if (nv != 2 || nh != 2) {
       return false;
     }
-  }
 
-  if (nv != 2 || nh != 2) {
-    return false;
-  }
+    xmin = std::min (vx [0], vx [1]);
+    xmax = std::max (vx [0], vx [1]);
+    ymin = std::min (hy [0], hy [1]);
+    ymax = std::max (hy [0], hy [1]);
 
-  const double xmin = std::min (vx [0], vx [1]);
-  const double xmax = std::max (vx [0], vx [1]);
-  const double ymin = std::min (hy [0], hy [1]);
-  const double ymax = std::max (hy [0], hy [1]);
-
-  if (fabs (vy1 [0] - ymin) > render_epsilon || fabs (vy1 [1] - ymin) > render_epsilon ||
-      fabs (vy2 [0] - ymax) > render_epsilon || fabs (vy2 [1] - ymax) > render_epsilon ||
-      fabs (hx1 [0] - xmin) > render_epsilon || fabs (hx1 [1] - xmin) > render_epsilon ||
-      fabs (hx2 [0] - xmax) > render_epsilon || fabs (hx2 [1] - xmax) > render_epsilon) {
-    return false;
+    if (fabs (vy1 [0] - ymin) > render_epsilon || fabs (vy1 [1] - ymin) > render_epsilon ||
+        fabs (vy2 [0] - ymax) > render_epsilon || fabs (vy2 [1] - ymax) > render_epsilon ||
+        fabs (hx1 [0] - xmin) > render_epsilon || fabs (hx1 [1] - xmin) > render_epsilon ||
+        fabs (hx2 [0] - xmax) > render_epsilon || fabs (hx2 [1] - xmax) > render_epsilon) {
+      return false;
+    }
   }
 
   if (xmax <= 0.0 || xmin >= double (bitmap.width ()) || ymax < 0.0 || ymin >= double (bitmap.height ())) {
@@ -566,11 +639,13 @@ try_render_rect_fill (Bitmap &bitmap, const std::vector<lay::RenderEdge> &edges)
     return true;
   }
 
-  double y = std::max (0.0, floor (ymin) + 1.0);
-  const double h = double (bitmap.height ());
-  while (y <= ymax && y < h) {
-    bitmap.fill ((unsigned int) (y + 0.5), x1int, x2int);
-    y += 1.0;
+  unsigned int yint = (unsigned int) std::max (0.0, floor (ymin) + 1.0);
+  const unsigned int yeint = (unsigned int) std::min (double (bitmap.height () - 1), floor (ymax));
+  const FillSpan span = make_fill_span (x1int, x2int);
+
+  while (yint <= yeint) {
+    fill_span (bitmap.scanline (yint), span);
+    ++yint;
   }
 
   return true;
@@ -664,11 +739,33 @@ Bitmap::render_vertices (std::vector<lay::RenderEdge> &edges, int mode)
   double xmax = width ();
   double ymax = height ();
 
+  if (mode == 0) {
+
+    for (std::vector<lay::RenderEdge>::iterator e = edges.begin (); e != edges.end (); ++e) {
+
+      double x = e->x1 () + 0.5;
+      double y = e->y1 () + 0.5;
+      if (x >= 0.0 && x < xmax && y >= 0.0 && y < ymax) {
+        fill_pixel (*this, (unsigned int)y, (unsigned int)x);
+      }
+
+      x = e->x2 () + 0.5;
+      y = e->y2 () + 0.5;
+      if (x >= 0.0 && x < xmax && y >= 0.0 && y < ymax) {
+        fill_pixel (*this, (unsigned int)y, (unsigned int)x);
+      }
+
+    }
+
+    return;
+
+  }
+
   for (std::vector<lay::RenderEdge>::iterator e = edges.begin (); e != edges.end (); ++e) {
 
     double x, y;
     
-    if (mode == 0 || e->delta () > 0) {
+    if (e->delta () > 0) {
       x = e->x1 () + 0.5;
       y = e->y1 () + 0.5;
       if (x >= 0.0 && x < xmax && y >= 0.0 && y < ymax) {
@@ -677,7 +774,7 @@ Bitmap::render_vertices (std::vector<lay::RenderEdge> &edges, int mode)
       }
     }
      
-    if (mode == 0 || e->delta () < 0) {
+    if (e->delta () < 0) {
       x = e->x2 () + 0.5;
       y = e->y2 () + 0.5;
       if (x >= 0.0 && x < xmax && y >= 0.0 && y < ymax) {
@@ -721,11 +818,13 @@ Bitmap::render_contour_ortho (std::vector<lay::RenderEdge> &edges)
           && x >= -0.5) {
 
         unsigned int xint  = (unsigned int) (std::max (0.0, std::min (double (width () - 1), x) + 0.5));
+        const unsigned int b = xint / 32;
+        const uint32_t mask = uint32_t (1) << (xint & 31);
         unsigned int yint  = (unsigned int) std::max (floor (e->y1 () + 0.5), 0.0);
         unsigned int yeint = (unsigned int) std::min (double (height () - 1), std::max (floor (e->y2 () + 0.5), 0.0));
 
         while (yint <= yeint) {
-          fill_pixel (*this, yint, xint);
+          scanline (yint) [b] |= mask;
           ++yint;
         }
 
@@ -990,5 +1089,3 @@ Bitmap::render_text (const lay::RenderText &text)
 
  
 } // namespace lay
-
-

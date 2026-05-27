@@ -46,6 +46,10 @@ to_string (const lay::Bitmap &bm)
 TEST(1) 
 {
   lay::Bitmap b1 (8, 8, 1.0, 1.0);
+  EXPECT_EQ (b1.empty (), true);
+  EXPECT_EQ (b1.first_scanline (), 0u);
+  EXPECT_EQ (b1.last_scanline (), 0u);
+
   EXPECT_EQ (to_string (b1), "--------\n"
                              "--------\n"
                              "--------\n"
@@ -56,6 +60,10 @@ TEST(1)
                              "--------\n");
 
   b1.fill (4, 3, 6);
+  EXPECT_EQ (b1.empty (), false);
+  EXPECT_EQ (b1.first_scanline (), 4u);
+  EXPECT_EQ (b1.last_scanline (), 5u);
+
   EXPECT_EQ (to_string (b1), "--------\n"
                              "--------\n"
                              "--------\n"
@@ -71,6 +79,9 @@ TEST(1)
 
   b1 = lay::Bitmap ();
   EXPECT_EQ (to_string (b1), "");
+  EXPECT_EQ (b1.empty (), true);
+  EXPECT_EQ (b1.first_scanline (), 0u);
+  EXPECT_EQ (b1.last_scanline (), 0u);
 
   b1 = b2;
   EXPECT_EQ (to_string (b1), to_string (b2));
@@ -114,7 +125,15 @@ TEST(2)
                              "###-----\n");
 
   b1.clear ();
+  EXPECT_EQ (b1.empty (), true);
+  EXPECT_EQ (b1.first_scanline (), 0u);
+  EXPECT_EQ (b1.last_scanline (), 0u);
+
   b1.merge (&b2, -1, -1);
+  EXPECT_EQ (b1.empty (), false);
+  EXPECT_EQ (b1.first_scanline (), 0u);
+  EXPECT_EQ (b1.last_scanline (), 1u);
+
   EXPECT_EQ (to_string (b1), "--------\n"
                              "--------\n"
                              "--------\n"
@@ -202,4 +221,3 @@ TEST(2)
                              "-----################################---\n");
 
 }
-

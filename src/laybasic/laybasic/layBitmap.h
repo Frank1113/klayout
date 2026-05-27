@@ -384,7 +384,7 @@ Bitmap::height () const
 inline unsigned int
 Bitmap::first_scanline () const
 {
-  return m_first_sl;
+  return empty () ? 0 : m_first_sl;
 }  
 
 inline unsigned int
