@@ -501,9 +501,88 @@ Bitmap::render_fill (std::vector<lay::RenderEdge> &edges)
   }
 }
 
+static inline bool
+try_render_rect_fill (Bitmap &bitmap, const std::vector<lay::RenderEdge> &edges)
+{
+  if (edges.size () != 4 || bitmap.width () == 0 || bitmap.height () == 0) {
+    return false;
+  }
+
+  unsigned int nv = 0, nh = 0;
+  double vx [2], vy1 [2], vy2 [2], hy [2], hx1 [2], hx2 [2];
+
+  for (std::vector<lay::RenderEdge>::const_iterator e = edges.begin (); e != edges.end (); ++e) {
+    if (e->is_horizontal ()) {
+      if (nh == 2) {
+        return false;
+      }
+      hy [nh] = e->y1 ();
+      hx1 [nh] = std::min (e->x1 (), e->x2 ());
+      hx2 [nh] = std::max (e->x1 (), e->x2 ());
+      ++nh;
+    } else if (fabs (e->x1 () - e->x2 ()) < render_epsilon) {
+      if (nv == 2) {
+        return false;
+      }
+      vx [nv] = e->x1 ();
+      vy1 [nv] = e->y1 ();
+      vy2 [nv] = e->y2 ();
+      ++nv;
+    } else {
+      return false;
+    }
+  }
+
+  if (nv != 2 || nh != 2) {
+    return false;
+  }
+
+  const double xmin = std::min (vx [0], vx [1]);
+  const double xmax = std::max (vx [0], vx [1]);
+  const double ymin = std::min (hy [0], hy [1]);
+  const double ymax = std::max (hy [0], hy [1]);
+
+  if (fabs (vy1 [0] - ymin) > render_epsilon || fabs (vy1 [1] - ymin) > render_epsilon ||
+      fabs (vy2 [0] - ymax) > render_epsilon || fabs (vy2 [1] - ymax) > render_epsilon ||
+      fabs (hx1 [0] - xmin) > render_epsilon || fabs (hx1 [1] - xmin) > render_epsilon ||
+      fabs (hx2 [0] - xmax) > render_epsilon || fabs (hx2 [1] - xmax) > render_epsilon) {
+    return false;
+  }
+
+  if (xmax <= 0.0 || xmin >= double (bitmap.width ()) || ymax < 0.0 || ymin >= double (bitmap.height ())) {
+    return true;
+  }
+
+  unsigned int x1int = 0;
+  if (xmin > 0.0) {
+    x1int = (unsigned int) xmin;
+    if (double (x1int) != xmin) {
+      ++x1int;
+    }
+  }
+
+  const unsigned int x2int = (unsigned int) std::min (double (bitmap.width () - 1), xmax) + 1;
+  if (x2int <= x1int) {
+    return true;
+  }
+
+  double y = std::max (0.0, floor (ymin) + 1.0);
+  const double h = double (bitmap.height ());
+  while (y <= ymax && y < h) {
+    bitmap.fill ((unsigned int) (y + 0.5), x1int, x2int);
+    y += 1.0;
+  }
+
+  return true;
+}
+
 void
 Bitmap::render_fill_ortho (std::vector<lay::RenderEdge> &edges)
 {
+  if (try_render_rect_fill (*this, edges)) {
+    return;
+  }
+
   //  sort the edges so we can operate on the sorted list
   tl::sort (edges.begin (), edges.end ());
 
@@ -571,6 +650,14 @@ Bitmap::render_fill_ortho (std::vector<lay::RenderEdge> &edges)
   }
 }
 
+static inline void
+fill_pixel (Bitmap &bitmap, unsigned int y, unsigned int x)
+{
+  uint32_t *sl = bitmap.scanline (y);
+  sl += x / 32;
+  *sl |= uint32_t (1) << (x & 31);
+}
+
 void
 Bitmap::render_vertices (std::vector<lay::RenderEdge> &edges, int mode)
 {
@@ -586,7 +673,7 @@ Bitmap::render_vertices (std::vector<lay::RenderEdge> &edges, int mode)
       y = e->y1 () + 0.5;
       if (x >= 0.0 && x < xmax && y >= 0.0 && y < ymax) {
         unsigned int xint = (unsigned int)x;
-        fill ((unsigned int)y, xint, xint + 1);
+        fill_pixel (*this, (unsigned int)y, xint);
       }
     }
      
@@ -595,7 +682,7 @@ Bitmap::render_vertices (std::vector<lay::RenderEdge> &edges, int mode)
       y = e->y2 () + 0.5;
       if (x >= 0.0 && x < xmax && y >= 0.0 && y < ymax) {
         unsigned int xint = (unsigned int)x;
-        fill ((unsigned int)y, xint, xint + 1);
+        fill_pixel (*this, (unsigned int)y, xint);
       }
     }
 
@@ -638,7 +725,7 @@ Bitmap::render_contour_ortho (std::vector<lay::RenderEdge> &edges)
         unsigned int yeint = (unsigned int) std::min (double (height () - 1), std::max (floor (e->y2 () + 0.5), 0.0));
 
         while (yint <= yeint) {
-          fill (yint, xint, xint + 1);
+          fill_pixel (*this, yint, xint);
           ++yint;
         }
 
