@@ -874,33 +874,57 @@ bitmaps_to_image (const std::vector<lay::ViewOp> &view_ops_in,
       tl::color_t *pt = (tl::color_t *) pimage->scan_line (height - 1 - y);
       uint32_t *dptr_end = dptr; 
 
-      unsigned int i = 0;
-      for (unsigned int x = 0; x < width; x += 32, ++i) {
+      if (masks.size () == 1) {
 
-        uint32_t y = 0;
-        uint32_t z = lay::wordones;
+        const bool set_bits = (masks [0].first & needed_bits) != 0;
+        const bool keep_bits = (masks [0].second & needed_bits) != 0;
+        dptr = dptr_end - nwords;
 
-        dptr = dptr_end - nwords + i;
-        for (int j = int (masks.size () - 1); j >= 0; --j) {
+        for (unsigned int x = 0; x < width; x += 32, ++dptr) {
           uint32_t d = *dptr;
+          if (width - x < 32) {
+            d &= (uint32_t (1) << (width - x)) - 1;
+          }
           if (d != 0) {
-            uint32_t m = 1;
-            for (unsigned int k = 0; k < 32 && x + k < width; ++k, m <<= 1) {
-              if ((d & m) != 0) { 
-                if (masks [j].first & needed_bits) {
-                  y |= (z & m);
-                }
-                if (! (masks [j].second & needed_bits)) {
-                  z &= ~m;
-                }
-              }
+            if (set_bits) {
+              *pt |= d;
+            } else if (! keep_bits) {
+              *pt &= ~d;
             }
           }
-          dptr -= nwords;
+          ++pt;
         }
 
-        *pt = (*pt & z) | y;
-        ++pt;
+      } else {
+
+        unsigned int i = 0;
+        for (unsigned int x = 0; x < width; x += 32, ++i) {
+
+          uint32_t y = 0;
+          uint32_t z = lay::wordones;
+          uint32_t word_mask = lay::wordones;
+          if (width - x < 32) {
+            word_mask = (uint32_t (1) << (width - x)) - 1;
+          }
+
+          dptr = dptr_end - nwords + i;
+          for (int j = int (masks.size () - 1); j >= 0; --j) {
+            uint32_t d = *dptr & word_mask;
+            if (d != 0) {
+              if (masks [j].first & needed_bits) {
+                y |= (z & d);
+              }
+              if (! (masks [j].second & needed_bits)) {
+                z &= ~d;
+              }
+            }
+            dptr -= nwords;
+          }
+
+          *pt = (*pt & z) | y;
+          ++pt;
+
+        }
 
       }
 
@@ -1054,4 +1078,3 @@ bitmap_to_bitmap (const lay::ViewOp &view_op, const lay::Bitmap &bitmap,
 }
 
 }
-

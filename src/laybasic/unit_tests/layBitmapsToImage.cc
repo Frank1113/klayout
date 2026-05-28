@@ -41,6 +41,20 @@ to_string (const tl::PixelBuffer &img, unsigned int mask)
   return s;
 }
 
+std::string
+to_string (const tl::BitmapBuffer &img)
+{
+  std::string s;
+  for (unsigned int y = 0; y < img.height (); ++y) {
+    const unsigned char *data = img.scan_line (y);
+    for (unsigned int x = 0; x < img.width (); ++x) {
+      s += (data [x / 8] & (1 << (x % 8))) ? "x" : ".";
+    }
+    s += "\n";
+  }
+  return s;
+}
+
 TEST(1) 
 {
   lay::Bitmap b1 (32, 32, 1.0, 1.0);
@@ -934,4 +948,70 @@ TEST(1)
     "................................\n"
   );
 
+}
+
+TEST(2)
+{
+  lay::Bitmap b1 (40, 4, 1.0, 1.0);
+  lay::Bitmap b2 (40, 4, 1.0, 1.0);
+
+  b1.fill (1, 2, 11);
+  b1.fill (2, 30, 40);
+  b2.fill (1, 6, 15);
+
+  std::vector<lay::Bitmap *> pbitmaps;
+  pbitmaps.push_back (&b1);
+  pbitmaps.push_back (&b2);
+
+  lay::DitherPattern dp;
+  lay::LineStyles ls;
+
+  {
+    std::vector<lay::ViewOp> view_ops;
+    view_ops.push_back (lay::ViewOp (0x008000, lay::ViewOp::Copy, 0, 0, 0, lay::ViewOp::Rect, 1));
+
+    tl::BitmapBuffer img (40, 4);
+    img.fill (false);
+    lay::bitmaps_to_image (view_ops, pbitmaps, dp, ls, 1.0, &img, 40, 4, false, 0);
+
+    EXPECT_EQ (to_string (img),
+      "........................................\n"
+      "..............................xxxxxxxxxx\n"
+      "..xxxxxxxxx.............................\n"
+      "........................................\n"
+    );
+  }
+
+  {
+    std::vector<lay::ViewOp> view_ops;
+    view_ops.push_back (lay::ViewOp (0x000000, lay::ViewOp::Copy, 0, 0, 0, lay::ViewOp::Rect, 1));
+
+    tl::BitmapBuffer img (40, 4);
+    img.fill (true);
+    lay::bitmaps_to_image (view_ops, pbitmaps, dp, ls, 1.0, &img, 40, 4, false, 0);
+
+    EXPECT_EQ (to_string (img),
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx..........\n"
+      "xx.........xxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+    );
+  }
+
+  {
+    std::vector<lay::ViewOp> view_ops;
+    view_ops.push_back (lay::ViewOp (0x008000, lay::ViewOp::Copy, 0, 0, 0, lay::ViewOp::Rect, 1));
+    view_ops.push_back (lay::ViewOp (0x008000, lay::ViewOp::Or, 0, 0, 0, lay::ViewOp::Rect, 1));
+
+    tl::BitmapBuffer img (40, 4);
+    img.fill (false);
+    lay::bitmaps_to_image (view_ops, pbitmaps, dp, ls, 1.0, &img, 40, 4, false, 0);
+
+    EXPECT_EQ (to_string (img),
+      "........................................\n"
+      "..............................xxxxxxxxxx\n"
+      "..xxxxxxxxxxxxx.........................\n"
+      "........................................\n"
+    );
+  }
 }
