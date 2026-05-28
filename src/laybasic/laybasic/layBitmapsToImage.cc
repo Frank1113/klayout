@@ -33,6 +33,19 @@
 namespace lay
 {
 
+static unsigned int
+low_bit_index (uint32_t bits)
+{
+  static const unsigned char index[32] = {
+    0, 1, 28, 2, 29, 14, 24, 3,
+    30, 22, 20, 15, 25, 17, 4, 8,
+    31, 27, 13, 23, 21, 19, 16, 7,
+    26, 12, 18, 6, 11, 5, 10, 9
+  };
+
+  return index [((bits & -bits) * 0x077cb531U) >> 27];
+}
+
 static void
 render_scanline_std (const uint32_t *dp, unsigned int ds, const lay::Bitmap *pbitmap, unsigned int y, unsigned int w, unsigned int /*h*/, uint32_t *data)
 {
@@ -666,22 +679,28 @@ bitmaps_to_image (const std::vector<lay::ViewOp> &view_ops_in,
 
           uint32_t d = *dptr;
           if (d != 0) {
+            const uint32_t or_mask = masks [j].first;
+            const uint32_t and_mask = masks [j].second;
 
             if (transparent) {
-              uint32_t m = 1;
-              for (unsigned int k = 0; k < 32 && x + k < width; ++k, m <<= 1) {
-                if ((d & m) != 0) {
-                  y [k] |= (masks [j].first & z [k]) | fill_bits;
-                  z [k] &= masks [j].second;
-                }
+              if (width - x < 32) {
+                d &= (uint32_t (1) << (width - x)) - 1;
+              }
+              while (d != 0) {
+                unsigned int k = low_bit_index (d);
+                y [k] |= (or_mask & z [k]) | fill_bits;
+                z [k] &= and_mask;
+                d &= d - 1;
               }
             } else {
-              uint32_t m = 1;
-              for (unsigned int k = 0; k < 32 && x + k < width; ++k, m <<= 1) {
-                if ((d & m) != 0) {
-                  y [k] |= masks [j].first & z [k];
-                  z [k] &= masks [j].second;
-                }
+              if (width - x < 32) {
+                d &= (uint32_t (1) << (width - x)) - 1;
+              }
+              while (d != 0) {
+                unsigned int k = low_bit_index (d);
+                y [k] |= or_mask & z [k];
+                z [k] &= and_mask;
+                d &= d - 1;
               }
             }
 
