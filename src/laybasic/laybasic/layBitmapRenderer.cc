@@ -55,11 +55,11 @@ BitmapRenderer::clear ()
 {
   //  this implementation is efficient but does not free memory - 
   //  the idea is to let the BitmapRenderer object manage its workspace.
-  m_edges.erase (m_edges.begin (), m_edges.end ());
+  m_edges.clear ();
   //  might be manhattan
   m_ortho = true;
   //  see above
-  m_texts.erase (m_texts.begin (), m_texts.end ());
+  m_texts.clear ();
 }
 
 void 
@@ -351,9 +351,51 @@ BitmapRenderer::render_box (double xmin, double ymin, double xmax, double ymax, 
   unsigned int y2int = (unsigned int) (std::max (0.0, std::min (ymax, double (bitmap->height () - 1))));
   unsigned int x1int = (unsigned int) (std::max (0.0, std::min (xmin, double (bitmap->width () - 1))));
   unsigned int x2int = (unsigned int) (std::max (0.0, std::min (xmax, double (bitmap->width () - 1))));
-  for (unsigned int y = y1int; y <= y2int; ++y) {
-    bitmap->fill (y, x1int, x2int + 1);
+  bitmap->fill_box (y1int, y2int + 1, x1int, x2int + 1);
+}
+
+static inline void
+render_ortho_box_fill (const db::DBox &box, lay::CanvasPlane *plane)
+{
+  lay::Bitmap *bitmap = static_cast<lay::Bitmap *> (plane);
+
+  const double xmin = box.left ();
+  const double xmax = box.right ();
+  const double ymin = box.bottom ();
+  const double ymax = box.top ();
+
+  if (xmax <= 0.0 || xmin >= double (bitmap->width ()) || ymax < 0.0 || ymin >= double (bitmap->height ())) {
+    return;
   }
+
+  unsigned int x1int = 0;
+  if (xmin > 0.0) {
+    x1int = (unsigned int) xmin;
+    if (double (x1int) != xmin) {
+      ++x1int;
+    }
+  }
+
+  const unsigned int x2int = (unsigned int) std::min (double (bitmap->width () - 1), xmax) + 1;
+  if (x2int <= x1int) {
+    return;
+  }
+
+  unsigned int yint = (unsigned int) std::max (0.0, floor (ymin) + 1.0);
+  const unsigned int yeint = (unsigned int) std::min (double (bitmap->height () - 1), floor (ymax));
+
+  bitmap->fill_box (yint, yeint + 1, x1int, x2int);
+}
+
+static inline bool
+try_render_ortho_box_fill (const db::DBox &box, lay::CanvasPlane *fill, lay::CanvasPlane *frame, lay::CanvasPlane *vertices, bool needs_fill)
+{
+  if (! needs_fill || ! fill || frame != 0 || vertices != 0) {
+    return false;
+  }
+
+  render_ortho_box_fill (box, fill);
+  return frame == 0 && vertices == 0;
 }
 
 void 
@@ -678,14 +720,28 @@ BitmapRenderer::draw (const db::ShortBox &box, const db::CplxTrans &trans,
 
     } else {
 
+      db::DBox rendered_box = trans * db::Box (box);
+      bool needs_fill = fill && (fill != frame || (box.width () > threshold && box.height () > threshold));
+      if (trans.is_ortho () && ! m_xfill && try_render_ortho_box_fill (rendered_box, fill, frame, vertices, needs_fill)) {
+        return;
+      }
+
       clear ();
-      insert (db::Box (box), trans);
+      if (trans.is_ortho ()) {
+        insert (rendered_box);
+      } else {
+        insert (db::Box (box), trans);
+      }
 
       if (vertices) {
         render_vertices (*vertices, 2);
       }
-      if (fill && (fill != frame || (box.width () > threshold && box.height () > threshold))) {
-        render_fill (*fill);
+      if (needs_fill) {
+        if (trans.is_ortho ()) {
+          render_ortho_box_fill (rendered_box, fill);
+        } else {
+          render_fill (*fill);
+        }
       }
       if (frame) {
         if (m_xfill) {
@@ -722,14 +778,28 @@ BitmapRenderer::draw (const db::Box &box, const db::CplxTrans &trans,
 
     } else {
 
+      db::DBox rendered_box = trans * box;
+      bool needs_fill = fill && (fill != frame || (box.width () > threshold && box.height () > threshold));
+      if (trans.is_ortho () && ! m_xfill && try_render_ortho_box_fill (rendered_box, fill, frame, vertices, needs_fill)) {
+        return;
+      }
+
       clear ();
-      insert (box, trans);
+      if (trans.is_ortho ()) {
+        insert (rendered_box);
+      } else {
+        insert (box, trans);
+      }
 
       if (vertices) {
         render_vertices (*vertices, 2);
       }
-      if (fill && (fill != frame || (box.width () > threshold && box.height () > threshold))) {
-        render_fill (*fill);
+      if (needs_fill) {
+        if (trans.is_ortho ()) {
+          render_ortho_box_fill (rendered_box, fill);
+        } else {
+          render_fill (*fill);
+        }
       }
       if (frame) {
         if (m_xfill) {
@@ -765,14 +835,19 @@ BitmapRenderer::draw (const db::DBox &box,
 
     } else {
 
+      bool needs_fill = fill && (fill != frame || (box.width () > 1.0 && box.height () > 1.0));
+      if (! m_xfill && try_render_ortho_box_fill (box, fill, frame, vertices, needs_fill)) {
+        return;
+      }
+
       clear ();
       insert (box);
 
       if (vertices) {
         render_vertices (*vertices, 2);
       }
-      if (fill && (fill != frame || (box.width () > 1.0 && box.height () > 1.0))) {
-        render_fill (*fill);
+      if (needs_fill) {
+        render_ortho_box_fill (box, fill);
       }
       if (frame) {
         if (m_xfill) {
@@ -809,14 +884,28 @@ BitmapRenderer::draw (const db::DBox &box, const db::DCplxTrans &trans,
 
     } else {
 
+      db::DBox rendered_box = trans * box;
+      bool needs_fill = fill && (fill != frame || (box.width () > threshold && box.height () > threshold));
+      if (trans.is_ortho () && ! m_xfill && try_render_ortho_box_fill (rendered_box, fill, frame, vertices, needs_fill)) {
+        return;
+      }
+
       clear ();
-      insert (box, trans);
+      if (trans.is_ortho ()) {
+        insert (rendered_box);
+      } else {
+        insert (box, trans);
+      }
 
       if (vertices) {
         render_vertices (*vertices, 2);
       }
-      if (fill && (fill != frame || (box.width () > threshold && box.height () > threshold))) {
-        render_fill (*fill);
+      if (needs_fill) {
+        if (trans.is_ortho ()) {
+          render_ortho_box_fill (rendered_box, fill);
+        } else {
+          render_fill (*fill);
+        }
       }
       if (frame) {
         if (m_xfill) {
@@ -1280,4 +1369,3 @@ BitmapRenderer::simplify_box (Box &b, const Trans &trans)
 }
 
 }
-

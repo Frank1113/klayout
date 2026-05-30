@@ -251,6 +251,13 @@ public:
   void fill (unsigned int y, unsigned int x1, unsigned int x2);
 
   /**
+   *  @brief Fill a rectangular span
+   *
+   *  Same as fill(), but repeated for the scanline range [y1,y2).
+   */
+  void fill_box (unsigned int y1, unsigned int y2, unsigned int x1, unsigned int x2);
+
+  /**
    *  @brief Clears the given part of the scanline
    *
    *  Same as fill(), but resets the bits.
@@ -325,6 +332,7 @@ private:
 
   void cleanup ();
   void init (unsigned int w, unsigned int h);
+  uint32_t *acquire_scanline (unsigned int n, bool &fresh);
 
   /**
    *  @brief Fill a bit pattern 

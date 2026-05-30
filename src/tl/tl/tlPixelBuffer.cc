@@ -30,6 +30,7 @@
 
 #include <memory>
 #include <cmath>
+#include <cstring>
 
 namespace tl
 {
@@ -247,10 +248,18 @@ PixelBuffer::fill (tl::color_t c)
   }
 
   tl::color_t *d = data ();
-  for (unsigned int i = 0; i < m_height; ++i) {
-    for (unsigned int j = 0; j < m_width; ++j) {
-      *d++ = c;
-    }
+  size_t n = size_t (m_width) * m_height;
+  if (c == 0) {
+    memset (d, 0, n * sizeof (tl::color_t));
+    return;
+  } else if (c == 0xffffffff) {
+    memset (d, 0xff, n * sizeof (tl::color_t));
+    return;
+  }
+
+  tl::color_t *de = d + n;
+  while (d != de) {
+    *d++ = c;
   }
 }
 
@@ -795,12 +804,7 @@ void
 BitmapBuffer::fill (bool value)
 {
   uint8_t c = value ? 0xff : 0;
-  uint8_t *d = data ();
-  for (unsigned int i = 0; i < m_height; ++i) {
-    for (unsigned int j = 0; j < m_stride; ++j) {
-      *d++ = c;
-    }
-  }
+  memset (data (), c, size_t (m_stride) * m_height);
 }
 
 uint8_t *

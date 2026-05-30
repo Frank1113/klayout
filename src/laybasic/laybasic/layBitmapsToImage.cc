@@ -30,12 +30,17 @@
 #include "tlAssert.h"
 #include "tlThreads.h"
 
+#include <cstring>
+
 namespace lay
 {
 
-static unsigned int
+static inline unsigned int
 low_bit_index (uint32_t bits)
 {
+#if defined(__GNUC__) || defined(__clang__)
+  return (unsigned int) __builtin_ctz (bits);
+#else
   static const unsigned char index[32] = {
     0, 1, 28, 2, 29, 14, 24, 3,
     30, 22, 20, 15, 25, 17, 4, 8,
@@ -44,12 +49,69 @@ low_bit_index (uint32_t bits)
   };
 
   return index [((bits & -bits) * 0x077cb531U) >> 27];
+#endif
 }
+
+static inline void
+fill_color_run (tl::color_t *pt, unsigned int n, tl::color_t c)
+{
+  while (n-- > 0) {
+    *pt++ = c;
+  }
+}
+
+static inline void
+or_color_run (tl::color_t *pt, unsigned int n, tl::color_t c)
+{
+  while (n-- > 0) {
+    *pt++ |= c;
+  }
+}
+
+static inline void
+mask_color_run (tl::color_t *pt, unsigned int n, tl::color_t and_mask, tl::color_t c)
+{
+  while (n-- > 0) {
+    *pt = (*pt & and_mask) | c;
+    ++pt;
+  }
+}
+
+struct ColorPlaneMask
+{
+  tl::color_t or_mask;
+  tl::color_t and_mask;
+  tl::color_t color;
+  bool copy;
+};
+
+struct MonoPlaneMask
+{
+  bool set_bits;
+  bool keep_bits;
+};
 
 static void
 render_scanline_std (const uint32_t *dp, unsigned int ds, const lay::Bitmap *pbitmap, unsigned int y, unsigned int w, unsigned int /*h*/, uint32_t *data)
 {
   const uint32_t *ps = pbitmap->scanline (y);
+
+  if (ds == 1) {
+    unsigned int nwords = (w + lay::wordlen - 1) / lay::wordlen;
+    if (*dp == lay::wordones) {
+      memcpy (data, ps, nwords * sizeof (uint32_t));
+      return;
+    } else if (*dp == 0) {
+      memset (data, 0, nwords * sizeof (uint32_t));
+      return;
+    }
+  }
+
+  if (pbitmap->is_scanline_empty (y)) {
+    memset (data, 0, ((w + lay::wordlen - 1) / lay::wordlen) * sizeof (uint32_t));
+    return;
+  }
+
   const uint32_t *dm = dp;
 
   unsigned int x = w;
@@ -69,6 +131,11 @@ render_scanline_std (const uint32_t *dp, unsigned int ds, const lay::Bitmap *pbi
 static void
 render_scanline_std_edge (const uint32_t *dp, unsigned int ds, const lay::Bitmap *pbitmap, unsigned int y, unsigned int w, unsigned int h, uint32_t *data)
 {
+  if (pbitmap->is_scanline_empty (y)) {
+    memset (data, 0, ((w + lay::wordlen - 1) / lay::wordlen) * sizeof (uint32_t));
+    return;
+  }
+
   const uint32_t *psp = (y > 0 ? pbitmap->scanline (y - 1) : pbitmap->empty_scanline ());
   const uint32_t *psn = (y < h - 1 ? pbitmap->scanline (y + 1) : pbitmap->empty_scanline ());
   const uint32_t *ps = pbitmap->scanline (y);
@@ -263,14 +330,23 @@ render_scanline_px (const uint32_t *dp, unsigned int ds, const lay::Bitmap *pbit
   unsigned int px2 = (pixels - 1) - px1;
 
   const uint32_t *ps[16];
+  bool all_empty = true;
   for (unsigned int p = 0; p < pixels; ++p) {
+    unsigned int yy = 0;
     if (y + p < px1) {
-      ps[p] = pbitmap->scanline (0);
+      yy = 0;
     } else if ((y + p - px1) >= h) {
-      ps[p] = pbitmap->scanline (h - 1);
+      yy = h - 1;
     } else {
-      ps[p] = pbitmap->scanline (y + p - px1);
+      yy = y + p - px1;
     }
+    ps[p] = pbitmap->scanline (yy);
+    all_empty = all_empty && pbitmap->is_scanline_empty (yy);
+  }
+
+  if (all_empty) {
+    memset (data, 0, ((w + lay::wordlen - 1) / lay::wordlen) * sizeof (uint32_t));
+    return;
   }
 
   uint32_t d, dd = 0, dn = 0;
@@ -340,21 +416,27 @@ render_scanline_cross (const uint32_t *dp, unsigned int ds, const lay::Bitmap *p
   unsigned int spx2 = (lw - 1) - spx1;
 
   const uint32_t *ps[max_pixels + 1];
+  bool all_empty = true;
   for (unsigned int p = 0; p < pixels; ++p) {
+    unsigned int yy = 0;
     if (y + p < px1) {
-      ps[p] = pbitmap->scanline (0);
+      yy = 0;
     } else if ((y + p - px1) >= h) {
-      ps[p] = pbitmap->scanline (h - 1);
+      yy = h - 1;
     } else {
-      ps[p] = pbitmap->scanline (y + p - px1);
+      yy = y + p - px1;
     }
+    ps[p] = pbitmap->scanline (yy);
+    all_empty = all_empty && pbitmap->is_scanline_empty (yy);
+  }
+
+  unsigned int nwords = (w + lay::wordlen - 1) / lay::wordlen;
+  memset (data, 0, nwords * sizeof (uint32_t));
+  if (all_empty) {
+    return;
   }
 
   uint32_t *dpp = data;
-  for (unsigned int i = (w + lay::wordlen - 1) / lay::wordlen; i > 0; --i) {
-    *dpp++ = 0;
-  }
-
   for (unsigned int o = 0; o < pixels; ++o) {
 
     dpp = data;
@@ -518,13 +600,38 @@ bitmaps_to_image (const std::vector<lay::ViewOp> &view_ops_in,
   std::map<unsigned int, lay::Bitmap> precursors;
   create_precursor_bitmaps (view_ops_in, vo_map, pbitmaps_in, bm_map, ls, width, height, precursors, mutex);
 
+  if (n_in == 0) {
+    return;
+  }
+
+  std::vector<const LineStyleInfo *> line_styles_in;
+  std::vector<const DitherPatternInfo *> dither_patterns_in;
+  std::vector<std::pair <tl::color_t, tl::color_t> > masks_in;
+  line_styles_in.reserve (n_in);
+  dither_patterns_in.reserve (n_in);
+  masks_in.reserve (n_in);
+  for (unsigned int i = 0; i < n_in; ++i) {
+    const lay::ViewOp &vop = view_ops_in [vo_map [i]];
+    unsigned int line_width = vop.width () > 0 ? (unsigned int) vop.width () : 0;
+    line_styles_in.push_back (&ls.style (vop.line_style_index ()).scaled (line_width));
+    dither_patterns_in.push_back (&dp.pattern (vop.dither_index ()).scaled (dpr));
+    masks_in.push_back (std::make_pair (vop.ormask () & 0x00ffffff,
+                                        ~vop.ormask () & vop.andmask () & 0x00ffffff));
+  }
+
   std::vector<lay::ViewOp> view_ops;
   std::vector<const lay::Bitmap *> pbitmaps;
-  std::vector<std::pair <tl::color_t, tl::color_t> > masks;
+  std::vector<const LineStyleInfo *> line_styles;
+  std::vector<const DitherPatternInfo *> dither_patterns;
+  std::vector<std::pair <tl::color_t, tl::color_t> > layer_masks;
+  std::vector<ColorPlaneMask> masks;
   std::vector<uint32_t> non_empty_sls;
 
   view_ops.reserve (n_in);
   pbitmaps.reserve (n_in);
+  line_styles.reserve (n_in);
+  dither_patterns.reserve (n_in);
+  layer_masks.reserve (n_in);
   masks.reserve (n_in);
   non_empty_sls.reserve (n_in);
 
@@ -547,9 +654,12 @@ bitmaps_to_image (const std::vector<lay::ViewOp> &view_ops_in,
     //  every "slice" scan lines test what bitmaps are empty 
     if (y % slice == 0) { 
 
-      view_ops.erase (view_ops.begin (), view_ops.end ());
-      pbitmaps.erase (pbitmaps.begin (), pbitmaps.end ());
-      non_empty_sls.erase (non_empty_sls.begin (), non_empty_sls.end ());
+      view_ops.clear ();
+      pbitmaps.clear ();
+      line_styles.clear ();
+      dither_patterns.clear ();
+      layer_masks.clear ();
+      non_empty_sls.clear ();
       for (unsigned int i = 0; i < n_in; ++i) {
 
         const lay::ViewOp &vop = view_ops_in [vo_map[i]];
@@ -583,6 +693,9 @@ bitmaps_to_image (const std::vector<lay::ViewOp> &view_ops_in,
           if (non_empty_sl || w > 1) {
             view_ops.push_back (vop);
             pbitmaps.push_back (pb);
+            line_styles.push_back (line_styles_in [i]);
+            dither_patterns.push_back (dither_patterns_in [i]);
+            layer_masks.push_back (masks_in [i]);
             non_empty_sls.push_back (non_empty_sl);
           }
 
@@ -594,9 +707,8 @@ bitmaps_to_image (const std::vector<lay::ViewOp> &view_ops_in,
 
     //  Collect all necessary information to transfer a single scanline ..
     
-    masks.erase (masks.begin (), masks.end ());
+    masks.clear ();
 
-    const uint32_t needed_bits = 0x00ffffff; // alpha channel not needed
     const uint32_t fill_bits   = 0xff000000; // fill alpha value with ones
     uint32_t *dptr = buffer;
     uint32_t ne_mask = (1 << (y % slice));
@@ -605,15 +717,19 @@ bitmaps_to_image (const std::vector<lay::ViewOp> &view_ops_in,
       const ViewOp &op = view_ops [i];
       if (op.width () > 1 || (op.width () == 1 && (non_empty_sls [i] & ne_mask) != 0)) {
 
-        const LineStyleInfo &ls_info = ls.style (op.line_style_index ()).scaled (op.width ());
-        const DitherPatternInfo &dp_info = dp.pattern (op.dither_index ()).scaled (dpr);
+        const LineStyleInfo &ls_info = *line_styles [i];
+        const DitherPatternInfo &dp_info = *dither_patterns [i];
         const uint32_t *dither = dp_info.pattern () [(y + op.dither_offset ()) % dp_info.height ()];
         if (dither != 0) {
 
           unsigned int dither_stride = dp_info.pattern_stride ();
 
-          masks.push_back (std::make_pair (op.ormask () & needed_bits,
-                                           ~op.ormask () & op.andmask () & needed_bits));
+          ColorPlaneMask mask;
+          mask.or_mask = layer_masks [i].first;
+          mask.and_mask = layer_masks [i].second;
+          mask.color = mask.or_mask | fill_bits;
+          mask.copy = (mask.and_mask == 0);
+          masks.push_back (mask);
 
           if (op.width () == 1) {
             if (ls_info.width () > 0) {
@@ -648,71 +764,308 @@ bitmaps_to_image (const std::vector<lay::ViewOp> &view_ops_in,
 
       tl::color_t *pt = (tl::color_t *) pimage->scan_line (height - 1 - y);
       uint32_t *dptr_end = dptr; 
+      const unsigned int full_words = width / 32;
+      const unsigned int tail_pixels = width & 31;
 
-      unsigned int i = 0;
-      for (unsigned int x = 0; x < width; x += 32, ++i) {
+      if (masks.size () == 1) {
 
-        tl::color_t y[32];
-        if (transparent) {
-          for (int i = 0; i < 32; ++i) {
-            y[i] = 0;
-          }
-        } else {
-          for (int i = 0; i < 32; ++i) {
-            y[i] = fill_bits;
-          }
-        };
+        const uint32_t and_mask = masks [0].and_mask;
+        const uint32_t color = masks [0].color;
+        dptr = dptr_end - nwords;
 
-        tl::color_t z[32] = { 
-          lay::wordones, lay::wordones, lay::wordones, lay::wordones, 
-          lay::wordones, lay::wordones, lay::wordones, lay::wordones, 
-          lay::wordones, lay::wordones, lay::wordones, lay::wordones, 
-          lay::wordones, lay::wordones, lay::wordones, lay::wordones, 
-          lay::wordones, lay::wordones, lay::wordones, lay::wordones, 
-          lay::wordones, lay::wordones, lay::wordones, lay::wordones, 
-          lay::wordones, lay::wordones, lay::wordones, lay::wordones, 
-          lay::wordones, lay::wordones, lay::wordones, lay::wordones, 
-        };
-
-        dptr = dptr_end - nwords + i;
-        for (int j = int (masks.size () - 1); j >= 0; --j) {
-
+        for (unsigned int i = 0; i < full_words; ++i, ++dptr, pt += 32) {
           uint32_t d = *dptr;
-          if (d != 0) {
-            const uint32_t or_mask = masks [j].first;
-            const uint32_t and_mask = masks [j].second;
+          if (and_mask == 0 && d == lay::wordones) {
+            fill_color_run (pt, 32, color);
+          } else if (d == lay::wordones) {
+            mask_color_run (pt, 32, and_mask, color);
+          } else {
+            if (! transparent) {
+              or_color_run (pt, 32, fill_bits);
+            }
+            while (d != 0) {
+              unsigned int k = low_bit_index (d);
+              pt [k] = (pt [k] & and_mask) | color;
+              d &= d - 1;
+            }
+          }
+        }
 
-            if (transparent) {
-              if (width - x < 32) {
-                d &= (uint32_t (1) << (width - x)) - 1;
+        if (tail_pixels > 0) {
+          const uint32_t word_mask = (uint32_t (1) << tail_pixels) - 1;
+          uint32_t d = *dptr & word_mask;
+
+          if (and_mask == 0 && d == word_mask) {
+            fill_color_run (pt, tail_pixels, color);
+          } else if (d == word_mask) {
+            mask_color_run (pt, tail_pixels, and_mask, color);
+          } else {
+            if (! transparent) {
+              or_color_run (pt, tail_pixels, fill_bits);
+            }
+            while (d != 0) {
+              unsigned int k = low_bit_index (d);
+              pt [k] = (pt [k] & and_mask) | color;
+              d &= d - 1;
+            }
+          }
+        }
+
+      } else {
+
+        bool all_copy = true;
+        for (std::vector<ColorPlaneMask>::const_iterator m = masks.begin (); m != masks.end (); ++m) {
+          if (! m->copy) {
+            all_copy = false;
+            break;
+          }
+        }
+
+        for (unsigned int i = 0; i < full_words; ++i) {
+
+          const unsigned int n = 32;
+          const uint32_t word_mask = lay::wordones;
+
+          if (all_copy) {
+
+            uint32_t remaining = word_mask;
+            dptr = dptr_end - nwords + i;
+            for (int j = int (masks.size () - 1); j >= 0 && remaining != 0; --j) {
+              uint32_t d = *dptr & remaining;
+              if (d != 0) {
+                const tl::color_t c = masks [j].color;
+                if (remaining == word_mask && d == word_mask) {
+                  fill_color_run (pt, n, c);
+                  remaining = 0;
+                  break;
+                } else if (d == remaining) {
+                  uint32_t r = remaining;
+                  while (r != 0) {
+                    unsigned int k = low_bit_index (r);
+                    pt [k] = c;
+                    r &= r - 1;
+                  }
+                  remaining = 0;
+                  break;
+                }
+                while (d != 0) {
+                  unsigned int k = low_bit_index (d);
+                  pt [k] = c;
+                  d &= d - 1;
+                }
+                remaining &= ~*dptr;
               }
-              while (d != 0) {
-                unsigned int k = low_bit_index (d);
-                y [k] |= (or_mask & z [k]) | fill_bits;
-                z [k] &= and_mask;
-                d &= d - 1;
-              }
-            } else {
-              if (width - x < 32) {
-                d &= (uint32_t (1) << (width - x)) - 1;
-              }
-              while (d != 0) {
-                unsigned int k = low_bit_index (d);
-                y [k] |= or_mask & z [k];
-                z [k] &= and_mask;
-                d &= d - 1;
+              dptr -= nwords;
+            }
+
+            if (! transparent) {
+              if (remaining == word_mask) {
+                or_color_run (pt, n, fill_bits);
+              } else {
+                while (remaining != 0) {
+                  unsigned int k = low_bit_index (remaining);
+                  pt [k] |= fill_bits;
+                  remaining &= remaining - 1;
+                }
               }
             }
 
+            pt += n;
+
+          } else {
+
+            bool initialized = false;
+            tl::color_t y[32];
+            tl::color_t z[32];
+
+            dptr = dptr_end - nwords + i;
+            if (transparent) {
+
+              for (int j = int (masks.size () - 1); j >= 0; --j) {
+
+                uint32_t d = *dptr & word_mask;
+                if (d != 0) {
+                  if (! initialized) {
+                    memset (y, 0, sizeof (y));
+                    memset (z, 0xff, sizeof (z));
+                    initialized = true;
+                  }
+                  const uint32_t or_mask = masks [j].or_mask;
+                  const uint32_t and_mask = masks [j].and_mask;
+                  while (d != 0) {
+                    unsigned int k = low_bit_index (d);
+                    y [k] |= (or_mask & z [k]) | fill_bits;
+                    z [k] &= and_mask;
+                    d &= d - 1;
+                  }
+                }
+
+                dptr -= nwords;
+
+              }
+
+            } else {
+
+              for (int j = int (masks.size () - 1); j >= 0; --j) {
+
+                uint32_t d = *dptr & word_mask;
+                if (d != 0) {
+                  if (! initialized) {
+                    fill_color_run (y, 32, fill_bits);
+                    memset (z, 0xff, sizeof (z));
+                    initialized = true;
+                  }
+                  const uint32_t or_mask = masks [j].or_mask;
+                  const uint32_t and_mask = masks [j].and_mask;
+                  while (d != 0) {
+                    unsigned int k = low_bit_index (d);
+                    y [k] |= or_mask & z [k];
+                    z [k] &= and_mask;
+                    d &= d - 1;
+                  }
+                }
+
+                dptr -= nwords;
+
+              }
+            }
+
+            if (initialized) {
+              for (unsigned int k = 0; k < n; ++k) {
+                *pt = (*pt & z[k]) | y[k];
+                ++pt;
+              }
+            } else {
+              if (! transparent) {
+                or_color_run (pt, n, fill_bits);
+              }
+              pt += n;
+            }
+
           }
-
-          dptr -= nwords;
-
         }
 
-        for (unsigned int k = 0; k < 32 && x + k < width; ++k) {
-          *pt = (*pt & z[k]) | y[k];
-          ++pt;
+        if (tail_pixels > 0) {
+
+          const unsigned int i = full_words;
+          const unsigned int n = tail_pixels;
+          const uint32_t word_mask = (uint32_t (1) << tail_pixels) - 1;
+
+          if (all_copy) {
+
+            uint32_t remaining = word_mask;
+            dptr = dptr_end - nwords + i;
+            for (int j = int (masks.size () - 1); j >= 0 && remaining != 0; --j) {
+              uint32_t d = *dptr & remaining;
+              if (d != 0) {
+                const tl::color_t c = masks [j].color;
+                if (remaining == word_mask && d == word_mask) {
+                  fill_color_run (pt, n, c);
+                  remaining = 0;
+                  break;
+                } else if (d == remaining) {
+                  uint32_t r = remaining;
+                  while (r != 0) {
+                    unsigned int k = low_bit_index (r);
+                    pt [k] = c;
+                    r &= r - 1;
+                  }
+                  remaining = 0;
+                  break;
+                }
+                while (d != 0) {
+                  unsigned int k = low_bit_index (d);
+                  pt [k] = c;
+                  d &= d - 1;
+                }
+                remaining &= ~*dptr;
+              }
+              dptr -= nwords;
+            }
+
+            if (! transparent) {
+              if (remaining == word_mask) {
+                or_color_run (pt, n, fill_bits);
+              } else {
+                while (remaining != 0) {
+                  unsigned int k = low_bit_index (remaining);
+                  pt [k] |= fill_bits;
+                  remaining &= remaining - 1;
+                }
+              }
+            }
+
+          } else {
+
+            bool initialized = false;
+            tl::color_t y[32];
+            tl::color_t z[32];
+
+            dptr = dptr_end - nwords + i;
+            if (transparent) {
+
+              for (int j = int (masks.size () - 1); j >= 0; --j) {
+
+                uint32_t d = *dptr & word_mask;
+                if (d != 0) {
+                  if (! initialized) {
+                    memset (y, 0, sizeof (y));
+                    memset (z, 0xff, sizeof (z));
+                    initialized = true;
+                  }
+                  const uint32_t or_mask = masks [j].or_mask;
+                  const uint32_t and_mask = masks [j].and_mask;
+                  while (d != 0) {
+                    unsigned int k = low_bit_index (d);
+                    y [k] |= (or_mask & z [k]) | fill_bits;
+                    z [k] &= and_mask;
+                    d &= d - 1;
+                  }
+                }
+
+                dptr -= nwords;
+
+              }
+
+            } else {
+
+              for (int j = int (masks.size () - 1); j >= 0; --j) {
+
+                uint32_t d = *dptr & word_mask;
+                if (d != 0) {
+                  if (! initialized) {
+                    fill_color_run (y, 32, fill_bits);
+                    memset (z, 0xff, sizeof (z));
+                    initialized = true;
+                  }
+                  const uint32_t or_mask = masks [j].or_mask;
+                  const uint32_t and_mask = masks [j].and_mask;
+                  while (d != 0) {
+                    unsigned int k = low_bit_index (d);
+                    y [k] |= or_mask & z [k];
+                    z [k] &= and_mask;
+                    d &= d - 1;
+                  }
+                }
+
+                dptr -= nwords;
+
+              }
+            }
+
+            if (initialized) {
+              for (unsigned int k = 0; k < n; ++k) {
+                *pt = (*pt & z[k]) | y[k];
+                ++pt;
+              }
+            } else {
+              if (! transparent) {
+                or_color_run (pt, n, fill_bits);
+              }
+              pt += n;
+            }
+
+          }
         }
 
       }
@@ -763,13 +1116,38 @@ bitmaps_to_image (const std::vector<lay::ViewOp> &view_ops_in,
   std::map<unsigned int, lay::Bitmap> precursors;
   create_precursor_bitmaps (view_ops_in, vo_map, pbitmaps_in, bm_map, ls, width, height, precursors, mutex);
 
+  if (n_in == 0) {
+    return;
+  }
+
+  std::vector<const LineStyleInfo *> line_styles_in;
+  std::vector<const DitherPatternInfo *> dither_patterns_in;
+  std::vector<std::pair <tl::color_t, tl::color_t> > masks_in;
+  line_styles_in.reserve (n_in);
+  dither_patterns_in.reserve (n_in);
+  masks_in.reserve (n_in);
+  for (unsigned int i = 0; i < n_in; ++i) {
+    const lay::ViewOp &vop = view_ops_in [vo_map [i]];
+    unsigned int line_width = vop.width () > 0 ? (unsigned int) vop.width () : 0;
+    line_styles_in.push_back (&ls.style (vop.line_style_index ()).scaled (line_width));
+    dither_patterns_in.push_back (&dp.pattern (vop.dither_index ()).scaled (dpr));
+    masks_in.push_back (std::make_pair (vop.ormask () & 0x008000,
+                                        ~vop.ormask () & vop.andmask () & 0x008000));
+  }
+
   std::vector<lay::ViewOp> view_ops;
   std::vector<const lay::Bitmap *> pbitmaps;
-  std::vector<std::pair <tl::color_t, tl::color_t> > masks;
+  std::vector<const LineStyleInfo *> line_styles;
+  std::vector<const DitherPatternInfo *> dither_patterns;
+  std::vector<std::pair <tl::color_t, tl::color_t> > layer_masks;
+  std::vector<MonoPlaneMask> masks;
   std::vector<uint32_t> non_empty_sls;
 
   view_ops.reserve (n_in);
   pbitmaps.reserve (n_in);
+  line_styles.reserve (n_in);
+  dither_patterns.reserve (n_in);
+  layer_masks.reserve (n_in);
   masks.reserve (n_in);
   non_empty_sls.reserve (n_in);
 
@@ -792,9 +1170,12 @@ bitmaps_to_image (const std::vector<lay::ViewOp> &view_ops_in,
     //  every "slice" scan lines test what bitmaps are empty 
     if (y % slice == 0) { 
 
-      view_ops.erase (view_ops.begin (), view_ops.end ());
-      pbitmaps.erase (pbitmaps.begin (), pbitmaps.end ());
-      non_empty_sls.erase (non_empty_sls.begin (), non_empty_sls.end ());
+      view_ops.clear ();
+      pbitmaps.clear ();
+      line_styles.clear ();
+      dither_patterns.clear ();
+      layer_masks.clear ();
+      non_empty_sls.clear ();
       for (unsigned int i = 0; i < n_in; ++i) {
 
         const lay::ViewOp &vop = view_ops_in [vo_map[i]];
@@ -828,6 +1209,9 @@ bitmaps_to_image (const std::vector<lay::ViewOp> &view_ops_in,
           if (non_empty_sl || w > 1) {
             view_ops.push_back (vop);
             pbitmaps.push_back (pb);
+            line_styles.push_back (line_styles_in [i]);
+            dither_patterns.push_back (dither_patterns_in [i]);
+            layer_masks.push_back (masks_in [i]);
             non_empty_sls.push_back (non_empty_sl);
           }
 
@@ -839,7 +1223,7 @@ bitmaps_to_image (const std::vector<lay::ViewOp> &view_ops_in,
 
     //  Collect all necessary information to transfer a single scanline ..
     
-    masks.erase (masks.begin (), masks.end ());
+    masks.clear ();
 
     uint32_t needed_bits = 0x008000; // only green bit 7 required
     uint32_t *dptr = buffer;
@@ -849,15 +1233,17 @@ bitmaps_to_image (const std::vector<lay::ViewOp> &view_ops_in,
       const ViewOp &op = view_ops [i];
       if (op.width () > 1 || (op.width () == 1 && (non_empty_sls [i] & ne_mask) != 0)) {
 
-        const LineStyleInfo &ls_info = ls.style (op.line_style_index ()).scaled (op.width ());
-        const DitherPatternInfo &dp_info = dp.pattern (op.dither_index ()).scaled (dpr);
+        const LineStyleInfo &ls_info = *line_styles [i];
+        const DitherPatternInfo &dp_info = *dither_patterns [i];
         const uint32_t *dither = dp_info.pattern () [(y + op.dither_offset ()) % dp_info.height ()];
         if (dither != 0) {
 
           unsigned int dither_stride = dp_info.pattern_stride ();
 
-          masks.push_back (std::make_pair (op.ormask () & needed_bits,
-                                           ~op.ormask () & op.andmask () & needed_bits));
+          MonoPlaneMask mask;
+          mask.set_bits = (layer_masks [i].first & needed_bits) != 0;
+          mask.keep_bits = (layer_masks [i].second & needed_bits) != 0;
+          masks.push_back (mask);
 
           if (op.width () == 1) {
             if (ls_info.width () > 0) {
@@ -895,8 +1281,8 @@ bitmaps_to_image (const std::vector<lay::ViewOp> &view_ops_in,
 
       if (masks.size () == 1) {
 
-        const bool set_bits = (masks [0].first & needed_bits) != 0;
-        const bool keep_bits = (masks [0].second & needed_bits) != 0;
+        const bool set_bits = masks [0].set_bits;
+        const bool keep_bits = masks [0].keep_bits;
         dptr = dptr_end - nwords;
 
         for (unsigned int x = 0; x < width; x += 32, ++dptr) {
@@ -930,10 +1316,10 @@ bitmaps_to_image (const std::vector<lay::ViewOp> &view_ops_in,
           for (int j = int (masks.size () - 1); j >= 0; --j) {
             uint32_t d = *dptr & word_mask;
             if (d != 0) {
-              if (masks [j].first & needed_bits) {
+              if (masks [j].set_bits) {
                 y |= (z & d);
               }
-              if (! (masks [j].second & needed_bits)) {
+              if (! masks [j].keep_bits) {
                 z &= ~d;
               }
             }

@@ -26,6 +26,8 @@
 #include "layFixedFont.h"
 #include "tlAlgorithm.h"
 
+#include <cstring>
+
 namespace lay {
 
 Bitmap::Bitmap ()
@@ -68,9 +70,7 @@ Bitmap::operator= (const Bitmap &d)
       if (! d.m_scanlines.empty () && d.m_scanlines [i] != 0) {
         uint32_t *sl = scanline (i);
         uint32_t *ss = d.m_scanlines [i];
-        for (unsigned int b = (m_width + 31) / 32; b > 0; --b) {
-          *sl++ = *ss++;
-        }
+        memcpy (sl, ss, ((m_width + 31) / 32) * sizeof (uint32_t));
       } else if (! m_scanlines.empty () && m_scanlines [i] != 0) {
         m_free.push_back (m_scanlines [i]);
         m_scanlines [i] = 0;
@@ -92,6 +92,17 @@ Bitmap::~Bitmap ()
 uint32_t *
 Bitmap::scanline (unsigned int n)
 {
+  bool fresh = false;
+  uint32_t *sl = acquire_scanline (n, fresh);
+  if (fresh) {
+    memset (sl, 0, ((m_width + 31) / 32) * sizeof (uint32_t));
+  }
+  return sl;
+}
+
+uint32_t *
+Bitmap::acquire_scanline (unsigned int n, bool &fresh)
+{
   if (m_scanlines.empty ()) {
     m_scanlines.resize (m_height, 0);
   }
@@ -105,15 +116,15 @@ Bitmap::scanline (unsigned int n)
     } else {
       sl = m_scanlines [n] = new uint32_t [b];
     }
-    for (uint32_t *p = sl; b > 0; --b) {
-      *p++ = 0;
-    }
     if (m_first_sl > n) {
       m_first_sl = n;
     }
     if (m_last_sl <= n) {
       m_last_sl = n + 1;
     }
+    fresh = true;
+  } else {
+    fresh = false;
   } 
   return sl;
 }
@@ -177,9 +188,7 @@ Bitmap::init (unsigned int w, unsigned int h)
   if (m_width > 0) {
     unsigned int b = (w + 31) / 32;
     m_empty_scanline = new uint32_t [b];
-    for (uint32_t *s = m_empty_scanline; b > 0; --b) {
-      *s++ = 0;
-    }
+    memset (m_empty_scanline, 0, b * sizeof (uint32_t));
   }
 
   m_first_sl = m_height;
@@ -361,8 +370,6 @@ static const uint32_t masks [32] = {
   0x0fffffff, 0x1fffffff, 0x3fffffff, 0x7fffffff
 };
 
-static const uint32_t all_ones = 0xffffffff;
-
 struct FillSpan
 {
   unsigned int b1;
@@ -383,34 +390,74 @@ make_fill_span (unsigned int x1, unsigned int x2)
 }
 
 static inline void
-fill_span (uint32_t *sl, const FillSpan &span)
+fill_span (uint32_t *sl, const FillSpan &span, bool fresh, unsigned int words)
 {
-  sl += span.b1;
+  uint32_t *s0 = sl;
+
+  if (fresh && span.b1 > 0) {
+    memset (s0, 0, span.b1 * sizeof (uint32_t));
+  }
+
+  sl = s0 + span.b1;
 
   if (span.b == 0) {
 
-    *sl |= span.first_mask;
+    if (fresh) {
+      *sl = span.first_mask;
+    } else {
+      *sl |= span.first_mask;
+    }
 
   } else {
 
-    *sl++ |= span.first_mask;
-    for (unsigned int b = span.b; b > 1; --b) {
-      *sl++ = all_ones;
+    if (fresh) {
+      *sl++ = span.first_mask;
+    } else {
+      *sl++ |= span.first_mask;
+    }
+    if (span.b > 1) {
+      memset (sl, 0xff, (span.b - 1) * sizeof (uint32_t));
+      sl += span.b - 1;
     }
 
     //  Hint: if x2==width and width%32==0, sl must not be accessed. This is guaranteed by
     //  checking if last_mask != 0.
     if (span.last_mask) {
-      *sl |= span.last_mask;
+      if (fresh) {
+        *sl = span.last_mask;
+      } else {
+        *sl |= span.last_mask;
+      }
     }
 
+  }
+
+  if (fresh) {
+    unsigned int last_word = span.b1 + span.b + ((span.b == 0 || span.last_mask != 0) ? 1 : 0);
+    if (last_word < words) {
+      memset (s0 + last_word, 0, (words - last_word) * sizeof (uint32_t));
+    }
   }
 }
 
 void
 Bitmap::fill (unsigned int y, unsigned int x1, unsigned int x2)
 {
-  fill_span (scanline (y), make_fill_span (x1, x2));
+  bool fresh = false;
+  uint32_t *sl = acquire_scanline (y, fresh);
+  fill_span (sl, make_fill_span (x1, x2), fresh, (m_width + 31) / 32);
+}
+
+void
+Bitmap::fill_box (unsigned int y1, unsigned int y2, unsigned int x1, unsigned int x2)
+{
+  const FillSpan span = make_fill_span (x1, x2);
+  const unsigned int words = (m_width + 31) / 32;
+  for (unsigned int y = y1; y < y2; ++y) {
+    bool fresh = false;
+    uint32_t *sl = acquire_scanline (y, fresh);
+    fill_span (sl, span, fresh, words);
+  }
 }
 
 void
@@ -429,9 +476,9 @@ Bitmap::clear (unsigned int y, unsigned int x1, unsigned int x2)
   } else if (b > 0) {
 
     *sl++ &= masks [x1 % 32];
-    while (b > 1) {
-      *sl++ = 0;
-      b--;
+    if (b > 1) {
+      memset (sl, 0, (b - 1) * sizeof (uint32_t));
+      sl += b - 1;
     }
 
     unsigned int m = masks [x2 % 32];
@@ -495,8 +542,10 @@ Bitmap::render_fill (std::vector<lay::RenderEdge> &edges)
       e->set_pos (e->x1 () + e->slope () * (y - e->y1 ()));
     }
 
-    PosCompareF f;
-    tl::sort (done, todo, f);
+    if (todo - done > 1) {
+      PosCompareF f;
+      tl::sort (done, todo, f);
+    }
 
     int c = 0;
     bool x1set = false;
@@ -641,12 +690,8 @@ try_render_rect_fill (Bitmap &bitmap, const std::vector<lay::RenderEdge> &edges)
 
   unsigned int yint = (unsigned int) std::max (0.0, floor (ymin) + 1.0);
   const unsigned int yeint = (unsigned int) std::min (double (bitmap.height () - 1), floor (ymax));
-  const FillSpan span = make_fill_span (x1int, x2int);
 
-  while (yint <= yeint) {
-    fill_span (bitmap.scanline (yint), span);
-    ++yint;
-  }
+  bitmap.fill_box (yint, yeint + 1, x1int, x2int);
 
   return true;
 }
@@ -687,8 +732,10 @@ Bitmap::render_fill_ortho (std::vector<lay::RenderEdge> &edges)
 
     std::vector<lay::RenderEdge>::iterator e;
 
-    X1CompareF f;
-    tl::sort (done, todo, f);
+    if (todo - done > 1) {
+      X1CompareF f;
+      tl::sort (done, todo, f);
+    }
 
     int c = 0;
     bool x1set = false;
@@ -875,7 +922,49 @@ Bitmap::render_contour (std::vector<lay::RenderEdge> &edges)
     //  we would first clip the line and then render it. This
     //  way we could remove the tests in the rendering loop.
 
-    if (e->y1 () < double (height ()) - 0.5 && e->y2 () >= -0.5) {
+    if (e->is_horizontal ()) {
+
+      double x1 = e->x1 ();
+      double x2 = e->x2 ();
+      if (x1 > x2) {
+        std::swap (x1, x2);
+      }
+
+      double y = e->y1 ();
+      if (y < double (height ()) - 0.5
+          && y >= -0.5
+          && x1 < double (width ()) - 0.5
+          && x2 >= -0.5) {
+
+        unsigned int x1int = (unsigned int) (std::max (0.0, std::min (double (width () - 1), x1) + 0.5));
+        unsigned int x2int = (unsigned int) (std::max (0.0, std::min (double (width () - 1), x2) + 0.5));
+        unsigned int yint  = (unsigned int) std::max (floor (y + 0.5), 0.0);
+        fill (yint, x1int, x2int + 1);
+
+      }
+
+    } else if (is_vertical (*e)) {
+
+      double x = e->x1 ();
+      if (e->y1 () < double (height ()) - 0.5
+          && e->y2 () >= -0.5
+          && x < double (width ()) - 0.5
+          && x >= -0.5) {
+
+        unsigned int xint  = (unsigned int) (std::max (0.0, std::min (double (width () - 1), x) + 0.5));
+        const unsigned int b = xint / 32;
+        const uint32_t mask = uint32_t (1) << (xint & 31);
+        unsigned int yint  = (unsigned int) std::max (floor (e->y1 () + 0.5), 0.0);
+        unsigned int yeint = (unsigned int) std::min (double (height () - 1), std::max (floor (e->y2 () + 0.5), 0.0));
+
+        while (yint <= yeint) {
+          scanline (yint) [b] |= mask;
+          ++yint;
+        }
+
+      }
+
+    } else if (e->y1 () < double (height ()) - 0.5 && e->y2 () >= -0.5) {
 
       double y = std::max (floor (e->y1 () + 0.5), 0.0);
       double x = e->pos (y - 0.5);
